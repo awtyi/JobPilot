@@ -1,0 +1,10 @@
+node_modules/
+.npm-cache/
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+vite*.log
+.npmrc
+skills
+个人求职岗位管理App_产品方案_v0.1.md
