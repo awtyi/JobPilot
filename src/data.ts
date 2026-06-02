@@ -1,9 +1,9 @@
 export const stages = ["待分析", "待投递", "已投递", "HR沟通", "面试中", "Offer", "已结束"] as const;
-export const directions = ["产品经理", "AI产品经理", "数字员工产品", "解决方案产品"] as const;
+export const defaultDirections = ["产品经理", "AI产品经理", "数字员工产品", "解决方案产品"] as const;
 export const priorities = ["A", "B", "C"] as const;
 
 export type Stage = (typeof stages)[number];
-export type Direction = (typeof directions)[number];
+export type Direction = string;
 export type Priority = (typeof priorities)[number];
 
 export interface Job {
@@ -96,6 +96,32 @@ const seedJobs: Job[] = [
 const DB_NAME = "jobpilot-db";
 const STORE_NAME = "jobs";
 const DB_VERSION = 1;
+const DIRECTIONS_STORAGE_KEY = "jobpilot-directions";
+
+function normalizeDirections(values: unknown): Direction[] {
+  if (!Array.isArray(values)) return [...defaultDirections];
+  const result: Direction[] = [];
+  values.forEach((value) => {
+    if (typeof value !== "string") return;
+    const normalized = value.trim();
+    if (!normalized || result.some((item) => item.toLocaleLowerCase() === normalized.toLocaleLowerCase())) return;
+    result.push(normalized);
+  });
+  return result.length ? result : [...defaultDirections];
+}
+
+export function loadDirections(): Direction[] {
+  try {
+    const stored = localStorage.getItem(DIRECTIONS_STORAGE_KEY);
+    return stored ? normalizeDirections(JSON.parse(stored)) : [...defaultDirections];
+  } catch {
+    return [...defaultDirections];
+  }
+}
+
+export function persistDirections(directions: Direction[]): void {
+  localStorage.setItem(DIRECTIONS_STORAGE_KEY, JSON.stringify(normalizeDirections(directions)));
+}
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -153,18 +179,19 @@ export async function removeJob(id: string): Promise<void> {
   });
 }
 
-export function createBlankJob(): Job {
+export function createBlankJob(jobDirection: Direction = "AI产品经理"): Job {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(), companyName: "", jobTitle: "", jobDirection: "AI产品经理", jdUrl: "",
+    id: crypto.randomUUID(), companyName: "", jobTitle: "", jobDirection, jdUrl: "",
     jdRawText: "", location: "", salaryRange: "", sourceChannel: "BOSS直聘", stage: "待分析",
     priority: "B", matchScore: 70, responsibilities: "", requirements: "", keywords: [],
     nextAction: "", nextFollowUpAt: "", notes: "", createdAt: now, updatedAt: now,
   };
 }
 
-export function parseJD(raw: string, url = ""): Job {
-  const job = createBlankJob();
+export function parseJD(raw: string, url = "", directions: Direction[] = [...defaultDirections]): Job {
+  const defaultDirection = directions.includes("AI产品经理") ? "AI产品经理" : directions[0] ?? "产品经理";
+  const job = createBlankJob(defaultDirection);
   const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const joined = lines.join("\n");
   const salary = joined.match(/(\d{1,2}\s*[kK千万][-~至到]\s*\d{1,2}\s*[kK千万](?:·\d{1,2}薪)?)/);
@@ -191,7 +218,7 @@ export function parseJD(raw: string, url = ""): Job {
     jobTitle: title?.[1] ?? lines.find((line) => /产品经理|Product Manager|PM/i.test(line))?.slice(0, 30) ?? "",
     location: location?.[1] ?? "",
     salaryRange: salary?.[1]?.replace(/\s/g, "") ?? "",
-    jobDirection: inferredDirection,
+    jobDirection: directions.includes(inferredDirection) ? inferredDirection : defaultDirection,
     responsibilities: responsibilityLines.join("\n"),
     requirements: requirementLines.join("\n"),
     keywords,

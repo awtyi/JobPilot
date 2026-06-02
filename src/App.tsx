@@ -32,9 +32,10 @@ import {
 } from "lucide-react";
 import {
   createBlankJob,
-  directions,
   loadJobs,
+  loadDirections,
   parseJD,
+  persistDirections,
   persistJob,
   priorities,
   removeJob,
@@ -75,6 +76,21 @@ const directionTone: Record<Direction, string> = {
   数字员工产品: "green",
   解决方案产品: "orange",
 };
+
+function defaultJobDirection(directions: Direction[]) {
+  return directions.includes("AI产品经理") ? "AI产品经理" : directions[0] ?? "产品经理";
+}
+
+function mergeJobDirections(directions: Direction[], jobs: Job[]) {
+  const merged = [...directions];
+  jobs.forEach((job) => {
+    const direction = job.jobDirection.trim();
+    if (direction && !merged.some((item) => item.toLocaleLowerCase() === direction.toLocaleLowerCase())) {
+      merged.push(direction);
+    }
+  });
+  return merged;
+}
 
 function formatDate(date: string) {
   if (!date) return "未设置";
@@ -145,6 +161,8 @@ export function App() {
   const [priorityFilter, setPriorityFilter] = useState<Priority | "全部">("全部");
   const [directionFilter, setDirectionFilter] = useState<Direction | "全部">("全部");
   const [locationFilter, setLocationFilter] = useState("");
+  const [dueOnly, setDueOnly] = useState(false);
+  const [directionOptions, setDirectionOptions] = useState<Direction[]>(loadDirections);
   const [lastBackup, setLastBackup] = useState(localStorage.getItem("jobpilot-last-backup") ?? "尚未备份");
   const [displayName, setDisplayName] = useState(localStorage.getItem("jobpilot-display-name") ?? "管理员");
 
@@ -156,6 +174,13 @@ export function App() {
       })
       .catch(() => setSaveState("error"));
   }, []);
+
+  useEffect(() => {
+    const merged = mergeJobDirections(directionOptions, jobs);
+    if (merged.length === directionOptions.length) return;
+    setDirectionOptions(merged);
+    persistDirections(merged);
+  }, [directionOptions, jobs]);
 
   const saveJob = async (job: Job) => {
     const updated = { ...job, updatedAt: new Date().toISOString() };
@@ -183,11 +208,12 @@ export function App() {
   const filteredJobs = useMemo(() => jobs.filter((job) => {
     const text = `${job.companyName} ${job.jobTitle} ${job.keywords.join(" ")}`.toLowerCase();
     return (!search || text.includes(search.toLowerCase()))
-      && (stageFilter === "全部" || job.stage === stageFilter)
+      && (stageFilter === "全部" ? job.stage !== "已结束" : job.stage === stageFilter)
       && (priorityFilter === "全部" || job.priority === priorityFilter)
       && (directionFilter === "全部" || job.jobDirection === directionFilter)
-      && (!locationFilter || job.location.includes(locationFilter));
-  }), [directionFilter, jobs, locationFilter, priorityFilter, search, stageFilter]);
+      && (!locationFilter || job.location.includes(locationFilter))
+      && (!dueOnly || isDue(job.nextFollowUpAt));
+  }), [directionFilter, dueOnly, jobs, locationFilter, priorityFilter, search, stageFilter]);
 
   const clearFilters = () => {
     setSearch("");
@@ -195,6 +221,7 @@ export function App() {
     setPriorityFilter("全部");
     setDirectionFilter("全部");
     setLocationFilter("");
+    setDueOnly(false);
   };
 
   const quickFilter = (kind: "due" | "a" | "analysis" | "wuhan") => {
@@ -203,7 +230,61 @@ export function App() {
     if (kind === "a") setPriorityFilter("A");
     if (kind === "analysis") setStageFilter("待分析");
     if (kind === "wuhan") setLocationFilter("武汉");
-    if (kind === "due") setSearch("");
+    if (kind === "due") setDueOnly(true);
+  };
+
+  const addDirection = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized) return null;
+    const existing = directionOptions.find((item) => item.toLocaleLowerCase() === normalized.toLocaleLowerCase());
+    if (existing) {
+      window.alert("该岗位方向已存在。");
+      return existing;
+    }
+    const updated = [...directionOptions, normalized];
+    setDirectionOptions(updated);
+    persistDirections(updated);
+    return normalized;
+  };
+
+  const renameDirection = async (current: Direction, value: string) => {
+    const normalized = value.trim();
+    if (!normalized || normalized === current) return;
+    if (directionOptions.some((item) => item !== current && item.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
+      window.alert("该岗位方向已存在。");
+      return;
+    }
+    const updatedDirections = directionOptions.map((item) => item === current ? normalized : item);
+    const updatedJobs = jobs.map((job) => job.jobDirection === current ? { ...job, jobDirection: normalized, updatedAt: new Date().toISOString() } : job);
+    setDirectionOptions(updatedDirections);
+    persistDirections(updatedDirections);
+    if (directionFilter === current) setDirectionFilter(normalized);
+    if (updatedJobs.every((job, index) => job === jobs[index])) return;
+    setJobs(updatedJobs);
+    setSaveState("saving");
+    try {
+      await replaceJobs(updatedJobs);
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  };
+
+  const deleteDirection = (direction: Direction) => {
+    if (directionOptions.length === 1) {
+      window.alert("至少需要保留一个岗位方向。");
+      return;
+    }
+    const usedCount = jobs.filter((job) => job.jobDirection === direction).length;
+    if (usedCount) {
+      window.alert(`仍有 ${usedCount} 个岗位使用“${direction}”，请先调整这些岗位或直接改名。`);
+      return;
+    }
+    if (!window.confirm(`确定删除岗位方向“${direction}”吗？`)) return;
+    const updated = directionOptions.filter((item) => item !== direction);
+    setDirectionOptions(updated);
+    persistDirections(updated);
+    if (directionFilter === direction) setDirectionFilter("全部");
   };
 
   const renderPage = () => {
@@ -211,7 +292,8 @@ export function App() {
     if (page === "jobs") return (
       <JobsPage
         jobs={filteredJobs}
-        allCount={jobs.length}
+        allCount={jobs.filter((job) => job.stage !== "已结束").length}
+        directions={directionOptions}
         view={jobView}
         setView={setJobView}
         search={search}
@@ -226,22 +308,25 @@ export function App() {
         setLocationFilter={setLocationFilter}
         clearFilters={clearFilters}
         onQuickAdd={() => setQuickAddOpen(true)}
-        onManualAdd={() => setEditingJob(createBlankJob())}
+        onManualAdd={() => setEditingJob(createBlankJob(defaultJobDirection(directionOptions)))}
         onOpen={setEditingJob}
         onSave={saveJob}
       />
     );
     if (page === "interviews") return <InterviewsPage jobs={jobs} onOpen={setEditingJob} />;
-    if (page === "analytics") return <AnalyticsPage jobs={jobs} />;
+    if (page === "analytics") return <AnalyticsPage jobs={jobs} directions={directionOptions} />;
     if (page === "exports") return <ExportsPage jobs={jobs} setJobs={setJobs} setLastBackup={setLastBackup} />;
-    return <SettingsPage jobs={jobs} displayName={displayName} setDisplayName={setDisplayName} />;
+    return <SettingsPage jobs={jobs} directions={directionOptions} displayName={displayName} setDisplayName={setDisplayName} onAddDirection={addDirection} onRenameDirection={renameDirection} onDeleteDirection={deleteDirection} />;
   };
 
   return (
     <div className="app">
       <Sidebar
         page={page}
-        setPage={setPage}
+        setPage={(nextPage) => {
+          if (nextPage === "jobs") clearFilters();
+          setPage(nextPage);
+        }}
         jobs={jobs}
         saveState={saveState}
         lastBackup={lastBackup}
@@ -258,14 +343,14 @@ export function App() {
               <Search size={16} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索公司、岗位或关键词" />
             </label>
-            <button className="btn secondary" onClick={() => setEditingJob(createBlankJob())}><Plus size={16} /> 新增岗位</button>
-            <button className="btn primary" onClick={() => setQuickAddOpen(true)}><Sparkles size={16} /> 录入 JD</button>
+            <button className="btn secondary" onClick={() => setEditingJob(createBlankJob(defaultJobDirection(directionOptions)))}><Plus size={16} /> 新增岗位</button>
+            <button className="btn primary" onClick={() => setQuickAddOpen(true)}><Sparkles size={16} /> JD识别</button>
           </div>
         </header>
         <div className="page-content">{renderPage()}</div>
       </main>
-      {quickAddOpen && <QuickAddDrawer onClose={() => setQuickAddOpen(false)} onSave={async (job) => { await saveJob(job); setQuickAddOpen(false); }} />}
-      {editingJob && <JobDetailDrawer job={editingJob} onClose={() => setEditingJob(null)} onSave={async (job) => { await saveJob(job); setEditingJob(null); }} onDelete={deleteJob} />}
+      {quickAddOpen && <QuickAddDrawer directions={directionOptions} onAddDirection={addDirection} onClose={() => setQuickAddOpen(false)} onSave={async (job) => { await saveJob(job); setQuickAddOpen(false); }} />}
+      {editingJob && <JobDetailDrawer job={editingJob} directions={directionOptions} onAddDirection={addDirection} onClose={() => setEditingJob(null)} onSave={async (job) => { await saveJob(job); setEditingJob(null); }} onDelete={deleteJob} />}
     </div>
   );
 }
@@ -349,14 +434,14 @@ function Dashboard({ jobs, displayName, onOpen, onPage }: { jobs: Job[]; display
 }
 
 function JobsPage(props: {
-  jobs: Job[]; allCount: number; view: JobView; setView: (view: JobView) => void;
+  jobs: Job[]; allCount: number; directions: Direction[]; view: JobView; setView: (view: JobView) => void;
   search: string; setSearch: (value: string) => void; stageFilter: Stage | "全部"; setStageFilter: (value: Stage | "全部") => void;
   priorityFilter: Priority | "全部"; setPriorityFilter: (value: Priority | "全部") => void;
   directionFilter: Direction | "全部"; setDirectionFilter: (value: Direction | "全部") => void;
   locationFilter: string; setLocationFilter: (value: string) => void; clearFilters: () => void;
   onQuickAdd: () => void; onManualAdd: () => void; onOpen: (job: Job) => void; onSave: (job: Job) => void;
 }) {
-  const { jobs, allCount, view, setView, search, setSearch, stageFilter, setStageFilter, priorityFilter, setPriorityFilter, directionFilter, setDirectionFilter, locationFilter, setLocationFilter, clearFilters, onOpen, onSave } = props;
+  const { jobs, allCount, directions, view, setView, search, setSearch, stageFilter, setStageFilter, priorityFilter, setPriorityFilter, directionFilter, setDirectionFilter, locationFilter, setLocationFilter, clearFilters, onOpen, onSave } = props;
   return (
     <div className="stack">
       <section className="jobs-toolbar">
@@ -391,7 +476,7 @@ function JobTable({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => void })
         <tbody>{jobs.map((job) => (
           <tr key={job.id} onClick={() => onOpen(job)}>
             <td><strong>{job.companyName || "未填写公司"}</strong><small>{job.jobTitle || "未填写岗位"}</small></td>
-            <td><Tag tone={directionTone[job.jobDirection]}>{job.jobDirection}</Tag></td>
+            <td><Tag tone={directionTone[job.jobDirection] ?? "neutral"}>{job.jobDirection}</Tag></td>
             <td><Tag tone={stageTone[job.stage]}>{job.stage}</Tag></td>
             <td><PriorityMark priority={job.priority} /></td>
             <td><Score score={job.matchScore} /></td>
@@ -406,9 +491,10 @@ function JobTable({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => void })
 }
 
 function JobBoard({ jobs, onOpen, onSave }: { jobs: Job[]; onOpen: (job: Job) => void; onSave: (job: Job) => void }) {
+  const boardStages = jobs.some((job) => job.stage === "已结束") ? stages : stages.slice(0, 6);
   return (
-    <div className="board">
-      {stages.slice(0, 6).map((stage) => {
+    <div className="board" style={{ gridTemplateColumns: `repeat(${boardStages.length}, minmax(165px, 1fr))` }}>
+      {boardStages.map((stage) => {
         const list = jobs.filter((job) => job.stage === stage);
         return (
           <section className="board-column" key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
@@ -446,7 +532,7 @@ function InterviewsPage({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => v
   );
 }
 
-function AnalyticsPage({ jobs }: { jobs: Job[] }) {
+function AnalyticsPage({ jobs, directions }: { jobs: Job[]; directions: Direction[] }) {
   const stageStats = stages.slice(0, 6).map((label) => ({ label, value: jobs.filter((job) => job.stage === label).length }));
   const directionStats = directions.map((label) => ({ label, value: jobs.filter((job) => job.jobDirection === label).length }));
   const channelStats = [...new Set(jobs.map((job) => job.sourceChannel))].map((label) => ({ label, value: jobs.filter((job) => job.sourceChannel === label).length }));
@@ -494,7 +580,15 @@ function ExportsPage({ jobs, setJobs, setLastBackup }: { jobs: Job[]; setJobs: (
   );
 }
 
-function SettingsPage({ jobs, displayName, setDisplayName }: { jobs: Job[]; displayName: string; setDisplayName: (value: string) => void }) {
+function SettingsPage({ jobs, directions, displayName, setDisplayName, onAddDirection, onRenameDirection, onDeleteDirection }: {
+  jobs: Job[];
+  directions: Direction[];
+  displayName: string;
+  setDisplayName: (value: string) => void;
+  onAddDirection: (value: string) => Direction | null;
+  onRenameDirection: (direction: Direction, value: string) => void;
+  onDeleteDirection: (direction: Direction) => void;
+}) {
   const [draftName, setDraftName] = useState(displayName);
   const saveDisplayName = () => {
     const nextName = draftName.trim() || "管理员";
@@ -505,6 +599,7 @@ function SettingsPage({ jobs, displayName, setDisplayName }: { jobs: Job[]; disp
   return (
     <div className="settings-list">
       <section><header><Pencil size={19} /><div><h3>工作台称呼</h3><p>用于首页欢迎语，默认显示“管理员”。</p></div></header><div className="setting-control"><input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={20} placeholder="管理员" /><button className="btn secondary" onClick={saveDisplayName}>保存</button></div></section>
+      <DirectionSettings directions={directions} onAdd={onAddDirection} onRename={onRenameDirection} onDelete={onDeleteDirection} />
       <section><header><ShieldCheck size={19} /><div><h3>本地优先存储</h3><p>岗位、联系人、薪资和跟进记录默认保存在当前浏览器 IndexedDB 中。</p></div></header><Tag tone="green">已启用</Tag></section>
       <section><header><Sparkles size={19} /><div><h3>AI 云端分析</h3><p>首版仅使用本地规则拆分 JD，不会把任何内容发送到外部模型。</p></div></header><Tag tone="gray">未启用</Tag></section>
       <section><header><Archive size={19} /><div><h3>当前数据量</h3><p>建议每周导出一次 JSON 备份，并自行保管导出的文件。</p></div></header><strong>{jobs.length} 条岗位</strong></section>
@@ -512,14 +607,19 @@ function SettingsPage({ jobs, displayName, setDisplayName }: { jobs: Job[]; disp
   );
 }
 
-function QuickAddDrawer({ onClose, onSave }: { onClose: () => void; onSave: (job: Job) => void }) {
+function QuickAddDrawer({ directions, onAddDirection, onClose, onSave }: {
+  directions: Direction[];
+  onAddDirection: (value: string) => Direction | null;
+  onClose: () => void;
+  onSave: (job: Job) => void;
+}) {
   const [step, setStep] = useState<"input" | "confirm">("input");
   const [url, setUrl] = useState("");
   const [raw, setRaw] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const recognize = () => {
     if (!raw.trim()) return;
-    setJob(parseJD(raw, url));
+    setJob(parseJD(raw, url, directions));
     setStep("confirm");
   };
   return (
@@ -534,7 +634,8 @@ function QuickAddDrawer({ onClose, onSave }: { onClose: () => void; onSave: (job
       ) : job && (
         <>
           <div className="drawer-note"><Check size={16} /><span>已完成本地规则识别。保存前可以继续调整字段。</span></div>
-          <JobForm job={job} onChange={setJob} compact />
+          <Field label="来源链接（可选）"><input value={job.jdUrl} onChange={(event) => setJob({ ...job, jdUrl: event.target.value })} placeholder="粘贴招聘页面链接，便于后续回看" /></Field>
+          <JobForm job={job} directions={directions} onAddDirection={onAddDirection} onChange={setJob} compact />
           <div className="drawer-footer"><button className="btn secondary" onClick={() => setStep("input")}>返回修改</button><button className="btn primary" disabled={!job.companyName || !job.jobTitle} onClick={() => onSave(job)}><Check size={16} /> 保存岗位</button></div>
         </>
       )}
@@ -542,13 +643,20 @@ function QuickAddDrawer({ onClose, onSave }: { onClose: () => void; onSave: (job
   );
 }
 
-function JobDetailDrawer({ job, onClose, onSave, onDelete }: { job: Job; onClose: () => void; onSave: (job: Job) => void; onDelete: (id: string) => void }) {
+function JobDetailDrawer({ job, directions, onAddDirection, onClose, onSave, onDelete }: {
+  job: Job;
+  directions: Direction[];
+  onAddDirection: (value: string) => Direction | null;
+  onClose: () => void;
+  onSave: (job: Job) => void;
+  onDelete: (id: string) => void;
+}) {
   const [draft, setDraft] = useState(job);
   const isNew = !draft.companyName && !draft.jobTitle;
   return (
     <Drawer title={isNew ? "新增岗位" : "岗位详情"} onClose={onClose} wide>
       {!isNew && <div className="detail-heading"><div><span>{draft.companyName}</span><h2>{draft.jobTitle}</h2></div><PriorityMark priority={draft.priority} /></div>}
-      <JobForm job={draft} onChange={setDraft} />
+      <JobForm job={draft} directions={directions} onAddDirection={onAddDirection} onChange={setDraft} />
       <div className="drawer-footer spread">
         <button className="btn danger" onClick={() => onDelete(draft.id)}><Trash2 size={16} /> 删除</button>
         <div><button className="btn secondary" onClick={onClose}>取消</button><button className="btn primary" disabled={!draft.companyName || !draft.jobTitle} onClick={() => onSave(draft)}><Check size={16} /> 保存更新</button></div>
@@ -557,14 +665,20 @@ function JobDetailDrawer({ job, onClose, onSave, onDelete }: { job: Job; onClose
   );
 }
 
-function JobForm({ job, onChange, compact = false }: { job: Job; onChange: (job: Job) => void; compact?: boolean }) {
+function JobForm({ job, directions, onAddDirection, onChange, compact = false }: {
+  job: Job;
+  directions: Direction[];
+  onAddDirection: (value: string) => Direction | null;
+  onChange: (job: Job) => void;
+  compact?: boolean;
+}) {
   const patch = <K extends keyof Job>(key: K, value: Job[K]) => onChange({ ...job, [key]: value });
   return (
     <div className={`job-form ${compact ? "compact" : ""}`}>
       <div className="form-grid two">
         <Field label="公司名称"><input value={job.companyName} onChange={(event) => patch("companyName", event.target.value)} placeholder="必填" /></Field>
         <Field label="岗位名称"><input value={job.jobTitle} onChange={(event) => patch("jobTitle", event.target.value)} placeholder="必填" /></Field>
-        <Field label="岗位方向"><Select value={job.jobDirection} onChange={(value) => patch("jobDirection", value as Direction)} options={directions} /></Field>
+        <Field label="岗位方向"><DirectionSelect value={job.jobDirection} options={directions} onChange={(value) => patch("jobDirection", value)} onAdd={onAddDirection} /></Field>
         <Field label="当前阶段"><Select value={job.stage} onChange={(value) => patch("stage", value as Stage)} options={stages} /></Field>
         <Field label="地点"><input value={job.location} onChange={(event) => patch("location", event.target.value)} placeholder="例如：武汉·光谷" /></Field>
         <Field label="薪资范围"><input value={job.salaryRange} onChange={(event) => patch("salaryRange", event.target.value)} placeholder="例如：18k-25k" /></Field>
@@ -583,6 +697,63 @@ function JobForm({ job, onChange, compact = false }: { job: Job; onChange: (job:
         <Field label="来源链接"><input value={job.jdUrl} onChange={(event) => patch("jdUrl", event.target.value)} placeholder="https://" /></Field>
       </>}
     </div>
+  );
+}
+
+function DirectionSelect({ value, options, onChange, onAdd }: {
+  value: Direction;
+  options: Direction[];
+  onChange: (value: Direction) => void;
+  onAdd: (value: string) => Direction | null;
+}) {
+  const add = () => {
+    const input = window.prompt("请输入新的岗位方向");
+    if (input === null) return;
+    const direction = onAdd(input);
+    if (direction) onChange(direction);
+  };
+  return (
+    <div className="direction-select-control">
+      <Select value={value} onChange={onChange} options={options} />
+      <button type="button" className="btn secondary compact" onClick={add}><Plus size={14} /> 新增</button>
+    </div>
+  );
+}
+
+function DirectionSettings({ directions, onAdd, onRename, onDelete }: {
+  directions: Direction[];
+  onAdd: (value: string) => Direction | null;
+  onRename: (direction: Direction, value: string) => void;
+  onDelete: (direction: Direction) => void;
+}) {
+  const [newDirection, setNewDirection] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const add = () => {
+    if (!newDirection.trim()) return;
+    if (onAdd(newDirection)) setNewDirection("");
+  };
+  return (
+    <section className="direction-settings">
+      <header><SlidersHorizontal size={19} /><div><h3>岗位方向</h3><p>新增方向会同步进入录入和筛选下拉。改名会同步更新已有岗位；使用中的方向不能直接删除。</p></div></header>
+      <div className="direction-settings-body">
+        <div className="direction-add">
+          <input value={newDirection} onChange={(event) => setNewDirection(event.target.value)} placeholder="新增岗位方向" />
+          <button className="btn secondary" disabled={!newDirection.trim()} onClick={add}><Plus size={14} /> 新增</button>
+        </div>
+        <div className="direction-option-list">
+          {directions.map((direction) => {
+            const value = drafts[direction] ?? direction;
+            return (
+              <div className="direction-option" key={direction}>
+                <input value={value} onChange={(event) => setDrafts((current) => ({ ...current, [direction]: event.target.value }))} />
+                <button className="btn secondary compact" disabled={!value.trim() || value.trim() === direction} onClick={() => onRename(direction, value)}><Check size={14} /> 保存</button>
+                <button className="icon-btn" title="删除岗位方向" onClick={() => onDelete(direction)}><Trash2 size={14} /></button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
   );
 }
 
