@@ -31,20 +31,31 @@ import {
   X,
 } from "lucide-react";
 import {
+  buildMatchSuggestion,
+  builtInSkills,
+  createBlankInterview,
   createBlankJob,
+  defaultSourceChannels,
+  inferSourceChannel,
+  interviewRounds,
+  loadPreferenceProfile,
   loadJobs,
   loadDirections,
   normalizeJob,
   parseJD,
   persistDirections,
   persistJob,
+  persistPreferenceProfile,
   priorities,
   removeJob,
   replaceJobs,
   stages,
+  SKILL_LIBRARY_VERSION,
   type Direction,
+  type InterviewRecord,
   type Job,
   type JobActivity,
+  type JobPreferenceProfile,
   type Priority,
   type Stage,
 } from "./data";
@@ -53,6 +64,7 @@ type Page = "dashboard" | "jobs" | "interviews" | "analytics" | "exports" | "set
 type SaveState = "loading" | "saving" | "saved" | "error";
 type JobView = "table" | "board" | "cards";
 type QuickAddStep = "input" | "confirm";
+type DialogState = { title: string; message: string; confirmLabel?: string; cancelLabel?: string; danger?: boolean; notice?: boolean };
 
 const QUICK_ADD_DRAFT_KEY = "jobpilot-quick-add-draft";
 const JOB_DRAFT_PREFIX = "jobpilot-job-draft:";
@@ -119,6 +131,16 @@ function collectCompanyOptions(jobs: Job[]) {
     if (identity && !options.has(identity)) options.set(identity, companyName);
   });
   return [...options.values()].sort((a, b) => a.localeCompare(b, "zh-CN"));
+}
+
+function collectSourceOptions(jobs: Job[]) {
+  const options = new Map<string, string>();
+  [...defaultSourceChannels, ...jobs.map((job) => job.sourceChannel)].forEach((source) => {
+    const value = source.trim();
+    const identity = normalizeIdentity(value);
+    if (identity && !options.has(identity)) options.set(identity, value);
+  });
+  return [...options.values()];
 }
 
 function findPotentialDuplicate(jobs: Job[], candidate: Job) {
@@ -213,6 +235,9 @@ export function App() {
   const [directionOptions, setDirectionOptions] = useState<Direction[]>(loadDirections);
   const [lastBackup, setLastBackup] = useState(localStorage.getItem("jobpilot-last-backup") ?? "尚未备份");
   const [displayName, setDisplayName] = useState(localStorage.getItem("jobpilot-display-name") ?? "管理员");
+  const [preferenceProfile, setPreferenceProfile] = useState<JobPreferenceProfile>(loadPreferenceProfile);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const dialogResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
 
   useEffect(() => {
     loadJobs()
@@ -250,12 +275,32 @@ export function App() {
   };
 
   const companyOptions = useMemo(() => collectCompanyOptions(jobs), [jobs]);
+  const sourceOptions = useMemo(() => collectSourceOptions(jobs), [jobs]);
+
+  const notify = (message: string, title = "提示") => {
+    dialogResolveRef.current?.(false);
+    dialogResolveRef.current = null;
+    setDialog({ title, message, notice: true, confirmLabel: "知道了" });
+  };
+
+  const requestConfirm = (message: string, options: Omit<DialogState, "message" | "notice"> = { title: "请确认" }) => new Promise<boolean>((resolve) => {
+    dialogResolveRef.current?.(false);
+    dialogResolveRef.current = resolve;
+    setDialog({ ...options, title: options.title || "请确认", message });
+  });
+
+  const closeDialog = (confirmed = false) => {
+    const resolve = dialogResolveRef.current;
+    dialogResolveRef.current = null;
+    setDialog(null);
+    resolve?.(confirmed);
+  };
 
   const saveJob = async (job: Job) => {
     const currentJobs = jobsRef.current;
     const existing = currentJobs.find((item) => item.id === job.id);
     const duplicate = findPotentialDuplicate(currentJobs, job);
-    if (duplicate && !window.confirm(`可能已存在重复岗位：${duplicate.companyName} / ${duplicate.jobTitle}。仍要继续保存吗？`)) {
+    if (duplicate && !await requestConfirm(`可能已存在重复岗位：${duplicate.companyName} / ${duplicate.jobTitle}。仍要继续保存吗？`, { title: "重复岗位提醒", confirmLabel: "仍然保存" })) {
       return false;
     }
     let resultReason = job.resultReason.trim();
@@ -273,7 +318,7 @@ export function App() {
           : `阶段更新为“${job.stage}”`;
       stageHistory.push(createActivity("stage-change", job.stage, note, existing.stage));
     }
-    const updated = { ...job, resultReason, stageHistory, updatedAt: new Date().toISOString() };
+    const updated = { ...job, ...buildMatchSuggestion(job, preferenceProfile), resultReason, stageHistory, updatedAt: new Date().toISOString() };
     setSaveState("saving");
     replaceJobsState(currentJobs.some((item) => item.id === updated.id)
       ? currentJobs.map((item) => item.id === updated.id ? updated : item)
@@ -289,7 +334,7 @@ export function App() {
           : jobsRef.current.filter((item) => item.id !== updated.id));
       }
       setSaveState("error");
-      window.alert("岗位保存失败，请稍后重试。当前编辑内容仍保留在页面中。");
+      notify("岗位保存失败，请稍后重试。当前编辑内容仍保留在页面中。", "保存失败");
       return false;
     }
   };
@@ -305,7 +350,7 @@ export function App() {
   };
 
   const deleteJob = async (id: string) => {
-    if (!window.confirm("确定删除这个岗位吗？此操作无法撤销。")) return false;
+    if (!await requestConfirm("确定删除这个岗位吗？此操作无法撤销。", { title: "删除岗位", confirmLabel: "删除", danger: true })) return false;
     setSaveState("saving");
     try {
       await (persistQueuesRef.current.get(id) ?? Promise.resolve()).catch(() => undefined);
@@ -316,7 +361,7 @@ export function App() {
       return true;
     } catch {
       setSaveState("error");
-      window.alert("岗位删除失败，请稍后重试。");
+      notify("岗位删除失败，请稍后重试。", "删除失败");
       return false;
     }
   };
@@ -354,7 +399,7 @@ export function App() {
     if (!normalized) return null;
     const existing = directionOptions.find((item) => item.toLocaleLowerCase() === normalized.toLocaleLowerCase());
     if (existing) {
-      window.alert("该岗位方向已存在。");
+      notify("该岗位方向已存在。");
       return existing;
     }
     const updated = [...directionOptions, normalized];
@@ -367,11 +412,15 @@ export function App() {
     const normalized = value.trim();
     if (!normalized || normalized === current) return;
     if (directionOptions.some((item) => item !== current && item.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
-      window.alert("该岗位方向已存在。");
+      notify("该岗位方向已存在。");
       return;
     }
     const updatedDirections = directionOptions.map((item) => item === current ? normalized : item);
-    const updatedJobs = jobs.map((job) => job.jobDirection === current ? { ...job, jobDirection: normalized, updatedAt: new Date().toISOString() } : job);
+    const updatedJobs = jobs.map((job) => {
+      if (job.jobDirection !== current) return job;
+      const updated = { ...job, jobDirection: normalized, updatedAt: new Date().toISOString() };
+      return { ...updated, ...buildMatchSuggestion(updated, preferenceProfile) };
+    });
     setDirectionOptions(updatedDirections);
     persistDirections(updatedDirections);
     if (directionFilter === current) setDirectionFilter(normalized);
@@ -386,17 +435,17 @@ export function App() {
     }
   };
 
-  const deleteDirection = (direction: Direction) => {
+  const deleteDirection = async (direction: Direction) => {
     if (directionOptions.length === 1) {
-      window.alert("至少需要保留一个岗位方向。");
+      notify("至少需要保留一个岗位方向。");
       return;
     }
     const usedCount = jobs.filter((job) => job.jobDirection === direction).length;
     if (usedCount) {
-      window.alert(`仍有 ${usedCount} 个岗位使用“${direction}”，请先调整这些岗位或直接改名。`);
+      notify(`仍有 ${usedCount} 个岗位使用“${direction}”，请先调整这些岗位或直接改名。`);
       return;
     }
-    if (!window.confirm(`确定删除岗位方向“${direction}”吗？`)) return;
+    if (!await requestConfirm(`确定删除岗位方向“${direction}”吗？`, { title: "删除岗位方向", confirmLabel: "删除", danger: true })) return;
     const updated = directionOptions.filter((item) => item !== direction);
     setDirectionOptions(updated);
     persistDirections(updated);
@@ -429,10 +478,24 @@ export function App() {
         onMoveStage={moveJobToStage}
       />
     );
-    if (page === "interviews") return <InterviewsPage jobs={jobs} onOpen={setEditingJob} />;
+    if (page === "interviews") return <InterviewsPage jobs={jobs} onSave={saveJob} onConfirm={requestConfirm} />;
     if (page === "analytics") return <AnalyticsPage jobs={jobs} directions={directionOptions} />;
-    if (page === "exports") return <ExportsPage jobs={jobs} setJobs={replaceJobsState} setLastBackup={setLastBackup} />;
-    return <SettingsPage jobs={jobs} directions={directionOptions} displayName={displayName} setDisplayName={setDisplayName} onAddDirection={addDirection} onRenameDirection={renameDirection} onDeleteDirection={deleteDirection} />;
+    if (page === "exports") return <ExportsPage jobs={jobs} setJobs={replaceJobsState} setLastBackup={setLastBackup} onConfirm={requestConfirm} onNotify={notify} />;
+    return <SettingsPage jobs={jobs} directions={directionOptions} displayName={displayName} setDisplayName={setDisplayName} preferenceProfile={preferenceProfile} onSavePreferenceProfile={async (profile) => {
+      const normalized = persistPreferenceProfile(profile);
+      setPreferenceProfile(normalized);
+      const updatedJobs = jobsRef.current.map((job) => ({ ...job, ...buildMatchSuggestion(job, normalized), updatedAt: new Date().toISOString() }));
+      replaceJobsState(updatedJobs);
+      setSaveState("saving");
+      try {
+        await replaceJobs(updatedJobs);
+        setSaveState("saved");
+        notify("个人求职画像已保存，岗位匹配度已重新计算。");
+      } catch {
+        setSaveState("error");
+        notify("个人求职画像已保存，但岗位匹配度批量更新失败。请刷新后重试。", "更新失败");
+      }
+    }} onAddDirection={addDirection} onRenameDirection={renameDirection} onDeleteDirection={deleteDirection} />;
   };
 
   return (
@@ -465,16 +528,17 @@ export function App() {
         </header>
         <div className="page-content">{renderPage()}</div>
       </main>
-      {quickAddOpen && <QuickAddDrawer companies={companyOptions} directions={directionOptions} onAddDirection={addDirection} onClose={() => setQuickAddOpen(false)} onSave={async (job) => {
+      {quickAddOpen && <QuickAddDrawer companies={companyOptions} directions={directionOptions} sources={sourceOptions} preferenceProfile={preferenceProfile} onAddDirection={addDirection} onClose={() => setQuickAddOpen(false)} onSave={async (job) => {
         const saved = await saveJob(job);
         if (saved) setQuickAddOpen(false);
         return saved;
       }} />}
-      {editingJob && <JobDetailDrawer job={editingJob} companies={companyOptions} directions={directionOptions} onAddDirection={addDirection} onClose={() => setEditingJob(null)} onSave={async (job) => {
+      {editingJob && <JobDetailDrawer job={editingJob} companies={companyOptions} directions={directionOptions} sources={sourceOptions} preferenceProfile={preferenceProfile} onAddDirection={addDirection} onClose={() => setEditingJob(null)} onSave={async (job) => {
         const saved = await saveJob(job);
         if (saved) setEditingJob(null);
         return saved;
       }} onDelete={deleteJob} />}
+      {dialog && <AppDialog dialog={dialog} onClose={closeDialog} />}
     </div>
   );
 }
@@ -638,18 +702,80 @@ function JobCards({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => void })
   return <div className="job-card-grid">{jobs.map((job) => <button className="job-card" onClick={() => onOpen(job)} key={job.id}><header><PriorityMark priority={job.priority} /><Tag tone={stageTone[job.stage]}>{job.stage}</Tag></header><h3>{job.companyName}</h3><p>{job.jobTitle}</p><div className="job-card-meta"><span>{job.location || "地点待补充"}</span><span>{job.salaryRange || "薪资待补充"}</span></div><footer><Score score={job.matchScore} /><small>{job.nextAction || "补充下一步行动"}</small></footer></button>)}</div>;
 }
 
-function InterviewsPage({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => void }) {
-  const interviewJobs = jobs.filter((job) => ["HR沟通", "面试中", "Offer"].includes(job.stage));
+function InterviewsPage({ jobs, onSave, onConfirm }: {
+  jobs: Job[];
+  onSave: (job: Job) => Promise<boolean>;
+  onConfirm: (message: string, options?: Omit<DialogState, "message" | "notice">) => Promise<boolean>;
+}) {
+  const interviewJobs = jobs.filter((job) => ["HR沟通", "面试中", "Offer"].includes(job.stage) || job.interviews.length > 0);
+  const [selectedId, setSelectedId] = useState(interviewJobs[0]?.id ?? "");
+  const [draft, setDraft] = useState<InterviewRecord>(createBlankInterview);
+  const [message, setMessage] = useState("");
+  const selectedJob = interviewJobs.find((job) => job.id === selectedId) ?? interviewJobs[0];
+  useEffect(() => {
+    if (!selectedJob && interviewJobs[0]) setSelectedId(interviewJobs[0].id);
+  }, [interviewJobs, selectedJob]);
+  const resetDraft = () => {
+    setDraft(createBlankInterview());
+    setMessage("");
+  };
+  const save = async () => {
+    if (!selectedJob) return;
+    if (!draft.questions.trim() && !draft.feedback.trim() && !draft.improvements.trim()) {
+      setMessage("请至少填写核心问题、反馈或改进动作中的一项。");
+      return;
+    }
+    const updatedRecord = { ...draft, updatedAt: new Date().toISOString() };
+    const interviews = selectedJob.interviews.some((record) => record.id === draft.id)
+      ? selectedJob.interviews.map((record) => record.id === draft.id ? updatedRecord : record)
+      : [updatedRecord, ...selectedJob.interviews];
+    if (await onSave({ ...selectedJob, interviews })) resetDraft();
+  };
+  const remove = async (record: InterviewRecord) => {
+    if (!selectedJob || !await onConfirm(`确定删除“${record.round}”复盘记录吗？`, { title: "删除面试复盘", confirmLabel: "删除", danger: true })) return;
+    if (await onSave({ ...selectedJob, interviews: selectedJob.interviews.filter((item) => item.id !== record.id) })) {
+      if (draft.id === record.id) resetDraft();
+    }
+  };
+  if (!interviewJobs.length) return <EmptyPanel title="暂无可复盘岗位" text="岗位进入 HR 沟通、面试中或 Offer 阶段后，可以在这里记录复盘。" />;
   return (
     <div className="split-layout">
       <section className="side-list">
-        <div className="section-heading"><div><h2>面试与沟通记录</h2><p>{interviewJobs.length} 个进行中的机会</p></div></div>
-        {interviewJobs.map((job) => <button key={job.id} onClick={() => onOpen(job)}><span><strong>{job.companyName}</strong><small>{job.jobTitle}</small></span><Tag tone={stageTone[job.stage]}>{job.stage}</Tag></button>)}
+        <div className="section-heading"><div><h2>面试与沟通记录</h2><p>{interviewJobs.length} 个可复盘机会</p></div></div>
+        {interviewJobs.map((job) => <button className={selectedJob?.id === job.id ? "active" : ""} key={job.id} onClick={() => { setSelectedId(job.id); resetDraft(); }}><span><strong>{job.companyName}</strong><small>{job.jobTitle} · {job.interviews.length} 条记录</small></span><Tag tone={stageTone[job.stage]}>{job.stage}</Tag></button>)}
       </section>
-      <section className="editor-placeholder">
-        <ClipboardList size={28} />
-        <h3>复盘每次关键沟通</h3>
-        <p>首版可在岗位详情中记录面试笔记和下一步行动。独立复盘编辑器将在下一轮补充。</p>
+      <section className="interview-editor">
+        <header className="interview-editor-heading">
+          <div><span>{selectedJob.companyName}</span><h2>{selectedJob.jobTitle}</h2></div>
+          <button className="btn secondary" onClick={resetDraft}><Plus size={15} /> 新增复盘</button>
+        </header>
+        <div className="interview-editor-grid">
+          <div className="interview-record-list">
+            <h3>历史记录</h3>
+            {selectedJob.interviews.length ? selectedJob.interviews.map((record) => (
+              <article className={draft.id === record.id ? "active" : ""} key={record.id}>
+                <button className="interview-record-main" onClick={() => { setDraft(record); setMessage(""); }}>
+                  <strong>{record.round}</strong><span>{record.interviewerRole || "面试官角色待补充"}</span><small>{record.interviewAt ? new Date(record.interviewAt).toLocaleString("zh-CN", { hour12: false }) : "时间待补充"}</small>
+                </button>
+                <button className="icon-btn bare" title="删除复盘" onClick={() => void remove(record)}><Trash2 size={14} /></button>
+              </article>
+            )) : <EmptyLine text="还没有复盘记录，可以从本次沟通开始。" />}
+          </div>
+          <div className="interview-form">
+            {message && <div className="drawer-note warning"><CircleHelp size={16} /><span>{message}</span></div>}
+            <div className="form-grid two">
+              <Field label="轮次"><Select value={draft.round} onChange={(value) => setDraft({ ...draft, round: value as InterviewRecord["round"] })} options={interviewRounds} /></Field>
+              <Field label="面试时间"><input type="datetime-local" value={draft.interviewAt} onChange={(event) => setDraft({ ...draft, interviewAt: event.target.value })} /></Field>
+            </div>
+            <Field label="面试官角色"><input value={draft.interviewerRole} onChange={(event) => setDraft({ ...draft, interviewerRole: event.target.value })} placeholder="例如：业务负责人、HRBP" /></Field>
+            <Field label="核心问题"><textarea value={draft.questions} onChange={(event) => setDraft({ ...draft, questions: event.target.value })} placeholder="记录面试中出现的问题" /></Field>
+            <Field label="回答摘要"><textarea value={draft.answerSummary} onChange={(event) => setDraft({ ...draft, answerSummary: event.target.value })} placeholder="简要记录自己的回答思路" /></Field>
+            <Field label="反馈与判断"><textarea value={draft.feedback} onChange={(event) => setDraft({ ...draft, feedback: event.target.value })} placeholder="记录反馈、信号和岗位判断" /></Field>
+            <Field label="改进动作"><textarea value={draft.improvements} onChange={(event) => setDraft({ ...draft, improvements: event.target.value })} placeholder="下次需要补足或调整什么" /></Field>
+            <Field label="下一步"><input value={draft.nextAction} onChange={(event) => setDraft({ ...draft, nextAction: event.target.value })} placeholder="例如：补充案例后回复 HR" /></Field>
+            <div className="interview-form-footer"><button className="btn primary" onClick={() => void save()}><Check size={15} /> 保存复盘</button></div>
+          </div>
+        </div>
       </section>
     </div>
   );
@@ -658,7 +784,7 @@ function InterviewsPage({ jobs, onOpen }: { jobs: Job[]; onOpen: (job: Job) => v
 function AnalyticsPage({ jobs, directions }: { jobs: Job[]; directions: Direction[] }) {
   const stageStats = stages.slice(0, 6).map((label) => ({ label, value: jobs.filter((job) => job.stage === label).length }));
   const directionStats = directions.map((label) => ({ label, value: jobs.filter((job) => job.jobDirection === label).length }));
-  const channelStats = [...new Set(jobs.map((job) => job.sourceChannel))].map((label) => ({ label, value: jobs.filter((job) => job.sourceChannel === label).length }));
+  const channelStats = [...new Set(jobs.map((job) => job.sourceChannel || "未填写"))].map((label) => ({ label, value: jobs.filter((job) => (job.sourceChannel || "未填写") === label).length }));
   const keywordStats = countKeywords(jobs).slice(0, 8).map(([label, value]) => ({ label, value }));
   return (
     <div className="analytics-grid">
@@ -670,7 +796,13 @@ function AnalyticsPage({ jobs, directions }: { jobs: Job[]; directions: Directio
   );
 }
 
-function ExportsPage({ jobs, setJobs, setLastBackup }: { jobs: Job[]; setJobs: (jobs: Job[]) => void; setLastBackup: (value: string) => void }) {
+function ExportsPage({ jobs, setJobs, setLastBackup, onConfirm, onNotify }: {
+  jobs: Job[];
+  setJobs: (jobs: Job[]) => void;
+  setLastBackup: (value: string) => void;
+  onConfirm: (message: string, options?: Omit<DialogState, "message" | "notice">) => Promise<boolean>;
+  onNotify: (message: string, title?: string) => void;
+}) {
   const fileInput = useRef<HTMLInputElement>(null);
   const backup = () => {
     downloadFile(JSON.stringify({ version: "0.1.0", exportedAt: new Date().toISOString(), jobs }, null, 2), `jobpilot-backup-${new Date().toISOString().slice(0, 10)}.json`, "application/json");
@@ -684,12 +816,12 @@ function ExportsPage({ jobs, setJobs, setLastBackup }: { jobs: Job[]; setJobs: (
     try {
       const parsed = JSON.parse(await file.text()) as { jobs?: Job[] };
       if (!Array.isArray(parsed.jobs)) throw new Error("invalid");
-      if (!window.confirm(`将使用备份中的 ${parsed.jobs.length} 条岗位覆盖当前数据，确定继续吗？`)) return;
+      if (!await onConfirm(`将使用备份中的 ${parsed.jobs.length} 条岗位覆盖当前数据，确定继续吗？`, { title: "恢复本地备份", confirmLabel: "覆盖恢复", danger: true })) return;
       await replaceJobs(parsed.jobs);
       setJobs(parsed.jobs.map(normalizeJob));
-      alert("备份恢复完成。");
+      onNotify("备份恢复完成。");
     } catch {
-      alert("无法读取该备份，请确认文件来自 JobPilot。");
+      onNotify("无法读取该备份，请确认文件来自 JobPilot。", "恢复失败");
     }
     event.target.value = "";
   };
@@ -703,11 +835,13 @@ function ExportsPage({ jobs, setJobs, setLastBackup }: { jobs: Job[]; setJobs: (
   );
 }
 
-function SettingsPage({ jobs, directions, displayName, setDisplayName, onAddDirection, onRenameDirection, onDeleteDirection }: {
+function SettingsPage({ jobs, directions, displayName, setDisplayName, preferenceProfile, onSavePreferenceProfile, onAddDirection, onRenameDirection, onDeleteDirection }: {
   jobs: Job[];
   directions: Direction[];
   displayName: string;
   setDisplayName: (value: string) => void;
+  preferenceProfile: JobPreferenceProfile;
+  onSavePreferenceProfile: (profile: JobPreferenceProfile) => void;
   onAddDirection: (value: string) => Direction | null;
   onRenameDirection: (direction: Direction, value: string) => void;
   onDeleteDirection: (direction: Direction) => void;
@@ -723,6 +857,7 @@ function SettingsPage({ jobs, directions, displayName, setDisplayName, onAddDire
     <div className="settings-list">
       <section><header><Pencil size={19} /><div><h3>工作台称呼</h3><p>用于首页欢迎语，默认显示“管理员”。</p></div></header><div className="setting-control"><input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={20} placeholder="管理员" /><button className="btn secondary" onClick={saveDisplayName}>保存</button></div></section>
       <DirectionSettings directions={directions} onAdd={onAddDirection} onRename={onRenameDirection} onDelete={onDeleteDirection} />
+      <PreferenceProfileSettings profile={preferenceProfile} onSave={onSavePreferenceProfile} />
       <section><header><ShieldCheck size={19} /><div><h3>本地优先存储</h3><p>岗位、联系人、薪资和跟进记录默认保存在当前浏览器 IndexedDB 中。</p></div></header><Tag tone="green">已启用</Tag></section>
       <section><header><Sparkles size={19} /><div><h3>AI 云端分析</h3><p>首版仅使用本地规则拆分 JD，不会把任何内容发送到外部模型。</p></div></header><Tag tone="gray">未启用</Tag></section>
       <section><header><Archive size={19} /><div><h3>当前数据量</h3><p>建议每周导出一次 JSON 备份，并自行保管导出的文件。</p></div></header><strong>{jobs.length} 条岗位</strong></section>
@@ -730,9 +865,59 @@ function SettingsPage({ jobs, directions, displayName, setDisplayName, onAddDire
   );
 }
 
-function QuickAddDrawer({ companies, directions, onAddDirection, onClose, onSave }: {
+function splitProfileValues(value: string) {
+  return [...new Set(value.split(/[、,，\n]+/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function PreferenceProfileSettings({ profile, onSave }: { profile: JobPreferenceProfile; onSave: (profile: JobPreferenceProfile) => void }) {
+  const [directions, setDirections] = useState(profile.targetDirections.join("、"));
+  const [locations, setLocations] = useState(profile.preferredLocations.join("、"));
+  const [salaryMin, setSalaryMin] = useState(String(profile.expectedMinSalaryK || ""));
+  const [salaryMax, setSalaryMax] = useState(String(profile.expectedMaxSalaryK || ""));
+  const [keywords, setKeywords] = useState(profile.customKeywords.join("、"));
+  const [skills, setSkills] = useState(profile.skills.map((skill) => `${skill.name} | ${skill.aliases.join("、")} | ${skill.weight}`).join("\n"));
+  useEffect(() => {
+    setDirections(profile.targetDirections.join("、"));
+    setLocations(profile.preferredLocations.join("、"));
+    setSalaryMin(String(profile.expectedMinSalaryK || ""));
+    setSalaryMax(String(profile.expectedMaxSalaryK || ""));
+    setKeywords(profile.customKeywords.join("、"));
+    setSkills(profile.skills.map((skill) => `${skill.name} | ${skill.aliases.join("、")} | ${skill.weight}`).join("\n"));
+  }, [profile]);
+  const save = () => onSave({
+    targetDirections: splitProfileValues(directions),
+    preferredLocations: splitProfileValues(locations),
+    expectedMinSalaryK: Number(salaryMin) || 0,
+    expectedMaxSalaryK: Number(salaryMax) || 0,
+    customKeywords: splitProfileValues(keywords),
+    skills: skills.split("\n").flatMap((line) => {
+      const [name = "", aliases = "", weight = "3"] = line.split("|").map((item) => item.trim());
+      return name ? [{ name, aliases: splitProfileValues(aliases), weight: Number(weight) || 3 }] : [];
+    }),
+  });
+  return (
+    <section className="preference-settings">
+      <header><Sparkles size={19} /><div><h3>个人求职画像</h3><p>用于计算个人匹配度。不同用户应维护自己的方向、技能、地点和薪资期望。</p></div></header>
+      <div className="preference-settings-body">
+        <div className="form-grid two">
+          <Field label="目标方向"><textarea value={directions} onChange={(event) => setDirections(event.target.value)} placeholder="AI产品经理、解决方案产品" /></Field>
+          <Field label="期望地点"><textarea value={locations} onChange={(event) => setLocations(event.target.value)} placeholder="武汉、远程" /></Field>
+          <Field label="最低期望薪资（k）"><input type="number" min="0" value={salaryMin} onChange={(event) => setSalaryMin(event.target.value)} placeholder="例如：10" /></Field>
+          <Field label="最高期望薪资（k，可选）"><input type="number" min="0" value={salaryMax} onChange={(event) => setSalaryMax(event.target.value)} placeholder="例如：30" /></Field>
+        </div>
+        <Field label="个人技能（每行：技能 | 别名，可多个 | 权重 1-5）"><textarea className="profile-skills" value={skills} onChange={(event) => setSkills(event.target.value)} placeholder={"RAG | 检索增强、知识库问答 | 5\n需求分析 | 需求梳理 | 4"} /></Field>
+        <Field label="自定义 JD 关键词"><textarea value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder="行业术语、证书或希望额外关注的能力" /></Field>
+        <div className="preference-footer"><span>内置技能词库 v{SKILL_LIBRARY_VERSION} · {builtInSkills.length} 个常用词</span><button className="btn primary" onClick={save}><Check size={14} /> 保存画像并重算</button></div>
+      </div>
+    </section>
+  );
+}
+
+function QuickAddDrawer({ companies, directions, sources, preferenceProfile, onAddDirection, onClose, onSave }: {
   companies: string[];
   directions: Direction[];
+  sources: string[];
+  preferenceProfile: JobPreferenceProfile;
   onAddDirection: (value: string) => Direction | null;
   onClose: () => void;
   onSave: (job: Job) => Promise<boolean>;
@@ -759,7 +944,7 @@ function QuickAddDrawer({ companies, directions, onAddDirection, onClose, onSave
       setMessage("请先粘贴 JD 原文，再进行识别。");
       return;
     }
-    const parsed = parseJD(raw, url, directions);
+    const parsed = parseJD(raw, url, directions, preferenceProfile);
     setJob(parsed);
     setMessage(parsed.companyName && parsed.jobTitle ? "" : "部分字段未识别，请补充公司名称和岗位名称后再保存。");
     setStep("confirm");
@@ -785,8 +970,8 @@ function QuickAddDrawer({ companies, directions, onAddDirection, onClose, onSave
       ) : job && (
         <>
           <div className="drawer-note"><Check size={16} /><span>已完成本地规则识别。保存前可以继续调整字段。</span></div>
-          <Field label="来源链接（可选）"><input value={job.jdUrl} onChange={(event) => setJob({ ...job, jdUrl: event.target.value })} placeholder="粘贴招聘页面链接，便于后续回看" /></Field>
-          <JobForm job={job} companies={companies} directions={directions} onAddDirection={onAddDirection} onChange={setJob} compact />
+          <Field label="来源链接（可选）"><input value={job.jdUrl} onChange={(event) => setJob({ ...job, jdUrl: event.target.value, sourceChannel: inferSourceChannel(event.target.value) || job.sourceChannel })} placeholder="粘贴招聘页面链接，便于后续回看" /></Field>
+          <JobForm job={job} companies={companies} directions={directions} sources={sources} onAddDirection={onAddDirection} onChange={setJob} compact />
           <div className="drawer-footer"><button className="btn secondary" onClick={() => setStep("input")}>返回修改</button><button className="btn primary" disabled={!job.companyName || !job.jobTitle} onClick={save}><Check size={16} /> 保存岗位</button></div>
         </>
       )}
@@ -794,10 +979,12 @@ function QuickAddDrawer({ companies, directions, onAddDirection, onClose, onSave
   );
 }
 
-function JobDetailDrawer({ job, companies, directions, onAddDirection, onClose, onSave, onDelete }: {
+function JobDetailDrawer({ job, companies, directions, sources, preferenceProfile, onAddDirection, onClose, onSave, onDelete }: {
   job: Job;
   companies: string[];
   directions: Direction[];
+  sources: string[];
+  preferenceProfile: JobPreferenceProfile;
   onAddDirection: (value: string) => Direction | null;
   onClose: () => void;
   onSave: (job: Job) => Promise<boolean>;
@@ -806,7 +993,7 @@ function JobDetailDrawer({ job, companies, directions, onAddDirection, onClose, 
   const isNew = !job.companyName && !job.jobTitle;
   const draftKey = `${JOB_DRAFT_PREFIX}${isNew ? "new" : job.id}`;
   const [savedDraft] = useState(() => loadLocalDraft<Job>(draftKey));
-  const [draft, setDraft] = useState(savedDraft ? { ...normalizeJob(savedDraft), stageHistory: job.stageHistory } : job);
+  const [draft, setDraft] = useState(savedDraft ? { ...normalizeJob(savedDraft), stage: job.stage, stageHistory: job.stageHistory } : job);
   const [draftRestored] = useState(Boolean(savedDraft));
   const [message, setMessage] = useState("");
   useEffect(() => {
@@ -835,10 +1022,11 @@ function JobDetailDrawer({ job, companies, directions, onAddDirection, onClose, 
       {!isNew && <div className="detail-heading"><div><span>{draft.companyName}</span><h2>{draft.jobTitle}</h2></div><PriorityMark priority={draft.priority} /></div>}
       <div className="job-detail-workspace">
         <div className="job-detail-main">
-          <JobForm job={draft} companies={companies} directions={directions} onAddDirection={onAddDirection} onChange={setDraft} />
+          <JobForm job={draft} companies={companies} directions={directions} sources={sources} onAddDirection={onAddDirection} onChange={setDraft} />
         </div>
         <aside className="job-detail-side">
           <JobStatusSummary job={draft} />
+          <MatchAssessment job={draft} onRefresh={() => setDraft({ ...draft, ...buildMatchSuggestion(draft, preferenceProfile) })} />
           <JobTimeline job={job} />
         </aside>
       </div>
@@ -881,15 +1069,82 @@ function CompanyInput({ value, options, onChange }: {
   );
 }
 
-function JobForm({ job, companies, directions, onAddDirection, onChange, compact = false }: {
+function SourceSelect({ value, options, onChange }: {
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const sourceOptions = value && !options.includes(value) ? [value, ...options] : options;
+  const add = () => {
+    const source = draft.trim();
+    if (!source) return;
+    onChange(source);
+    setDraft("");
+    setAdding(false);
+  };
+  return (
+    <div className="direction-select-stack">
+      <div className="direction-select-control">
+        <Select value={value} onChange={onChange} options={["", ...sourceOptions]} />
+        <button type="button" className="btn secondary compact" onClick={() => setAdding(true)}><Plus size={14} /> 新增</button>
+      </div>
+      {adding && <div className="direction-inline-add">
+        <input autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter") add();
+          if (event.key === "Escape") setAdding(false);
+        }} placeholder="输入新的岗位来源" />
+        <button type="button" className="btn secondary compact" disabled={!draft.trim()} onClick={add}>确定</button>
+        <button type="button" className="icon-btn compact" title="取消新增" onClick={() => { setDraft(""); setAdding(false); }}><X size={14} /></button>
+      </div>}
+    </div>
+  );
+}
+
+function MatchAssessment({ job, onRefresh }: { job: Job; onRefresh: () => void }) {
+  return (
+    <section className="match-assessment">
+      <details>
+        <summary><strong>匹配分析</strong><span>{job.matchSuggestedScore} 分 · 完整度 {job.dataCompletenessScore}%</span></summary>
+        <p className="match-note">建议分依据个人求职画像计算，人工匹配度仍可单独调整。</p>
+        <button type="button" className="btn secondary compact" onClick={onRefresh}>重新计算</button>
+        <div className="match-dimension-grid">
+          {job.matchDimensions.map((dimension) => (
+            <div key={dimension.label}>
+              <span>{dimension.label}<em>{dimension.score}</em></span>
+              <p>{dimension.evidence}</p>
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function ParseEvidencePanel({ job }: { job: Job }) {
+  if (!job.parseEvidence.length) return null;
+  return (
+    <details className="parse-evidence">
+      <summary>查看识别依据 · {job.parseEvidence.length} 项</summary>
+      <div>
+        {job.parseEvidence.map((evidence) => <p key={evidence.field}><strong>{evidence.label}</strong><span>{evidence.confidence}%</span><em>{evidence.source}</em></p>)}
+      </div>
+    </details>
+  );
+}
+
+function JobForm({ job, companies, directions, sources, onAddDirection, onChange, compact = false }: {
   job: Job;
   companies: string[];
   directions: Direction[];
+  sources: string[];
   onAddDirection: (value: string) => Direction | null;
   onChange: (job: Job) => void;
   compact?: boolean;
 }) {
   const patch = <K extends keyof Job>(key: K, value: Job[K]) => onChange({ ...job, [key]: value });
+  const patchUrl = (value: string) => onChange({ ...job, jdUrl: value, sourceChannel: inferSourceChannel(value) || job.sourceChannel });
   return (
     <div className={`job-form ${compact ? "compact" : ""}`}>
       <div className="form-grid two">
@@ -897,13 +1152,19 @@ function JobForm({ job, companies, directions, onAddDirection, onChange, compact
         <Field label="岗位名称"><input value={job.jobTitle} onChange={(event) => patch("jobTitle", event.target.value)} placeholder="必填" /></Field>
         <Field label="岗位方向"><DirectionSelect value={job.jobDirection} options={directions} onChange={(value) => patch("jobDirection", value)} onAdd={onAddDirection} /></Field>
         <Field label="当前阶段"><Select value={job.stage} onChange={(value) => patch("stage", value as Stage)} options={stages} /></Field>
+        <Field label="岗位来源"><SourceSelect value={job.sourceChannel} options={sources} onChange={(value) => patch("sourceChannel", value)} /></Field>
         <Field label="地点"><input value={job.location} onChange={(event) => patch("location", event.target.value)} placeholder="例如：武汉·光谷" /></Field>
         <Field label="薪资范围"><input value={job.salaryRange} onChange={(event) => patch("salaryRange", event.target.value)} placeholder="例如：18k-25k" /></Field>
         <Field label="优先级"><Select value={job.priority} onChange={(value) => patch("priority", value as Priority)} options={priorities} /></Field>
-        <Field label="匹配度"><input type="number" min="0" max="100" value={job.matchScore} onChange={(event) => patch("matchScore", Number(event.target.value))} /></Field>
+        <Field label="人工匹配度"><input type="number" min="0" max="100" value={job.matchScore} onChange={(event) => patch("matchScore", Number(event.target.value))} /></Field>
       </div>
-      <Field label="核心职责"><textarea value={job.responsibilities} onChange={(event) => patch("responsibilities", event.target.value)} placeholder="岗位需要做什么" /></Field>
-      <Field label="任职要求"><textarea value={job.requirements} onChange={(event) => patch("requirements", event.target.value)} placeholder="能力、经验和加分项" /></Field>
+      <ParseEvidencePanel job={job} />
+      <section className="jd-focus-section">
+        <header><div><h3>JD 重点</h3><p>优先核对职责与要求，编辑框可继续拖动增高。</p></div></header>
+        <Field label="核心职责"><textarea className="jd-focus-textarea" value={job.responsibilities} onChange={(event) => patch("responsibilities", event.target.value)} placeholder="岗位需要做什么" /></Field>
+        <Field label="任职要求"><textarea className="jd-focus-textarea" value={job.requirements} onChange={(event) => patch("requirements", event.target.value)} placeholder="能力、经验和加分项" /></Field>
+        {job.jdRawText && <details className="jd-raw-details"><summary>查看完整 JD 原文</summary><textarea readOnly value={job.jdRawText} /></details>}
+      </section>
       <Field label="JD 关键词"><input value={job.keywords.join("、")} onChange={(event) => patch("keywords", event.target.value.split(/[、,，\s]+/).filter(Boolean))} placeholder="Agent、RAG、Prompt" /></Field>
       {job.stage === "已结束" && <Field label="结束原因"><textarea value={job.resultReason} onChange={(event) => patch("resultReason", event.target.value)} placeholder="例如：已拒绝、主动放弃、岗位关闭" /></Field>}
       {!compact && <>
@@ -912,7 +1173,7 @@ function JobForm({ job, companies, directions, onAddDirection, onChange, compact
           <Field label="下次跟进日期"><input type="date" value={job.nextFollowUpAt} onChange={(event) => patch("nextFollowUpAt", event.target.value)} /></Field>
         </div>
         <Field label="沟通与面试笔记"><textarea value={job.notes} onChange={(event) => patch("notes", event.target.value)} placeholder="记录问题、反馈和需要改进的地方" /></Field>
-        <Field label="来源链接"><input value={job.jdUrl} onChange={(event) => patch("jdUrl", event.target.value)} placeholder="https://" /></Field>
+        <Field label="来源链接"><input value={job.jdUrl} onChange={(event) => patchUrl(event.target.value)} placeholder="https://" /></Field>
       </>}
     </div>
   );
@@ -947,7 +1208,8 @@ function JobStatusSummary({ job }: { job: Job }) {
       <dl>
         <div><dt>阶段</dt><dd><Tag tone={stageTone[job.stage]}>{job.stage}</Tag></dd></div>
         <div><dt>优先级</dt><dd><PriorityMark priority={job.priority} /></dd></div>
-        <div><dt>匹配度</dt><dd><Score score={job.matchScore} /></dd></div>
+        <div><dt>人工匹配度</dt><dd><Score score={job.matchScore} /></dd></div>
+        <div><dt>画像建议分</dt><dd>{job.matchSuggestedScore}</dd></div>
         <div><dt>下次跟进</dt><dd>{formatDate(job.nextFollowUpAt)}</dd></div>
       </dl>
       <div className="job-status-action">
@@ -1036,12 +1298,27 @@ function Drawer({ title, onClose, wide, children }: { title: string; onClose: ()
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className={`drawer ${wide ? "wide" : ""}`} onMouseDown={(event) => event.stopPropagation()}><header><h2>{title}</h2><button className="icon-btn" title="关闭" onClick={onClose}><X size={18} /></button></header><div className="drawer-body">{children}</div></aside></div>;
 }
 
+function AppDialog({ dialog, onClose }: { dialog: DialogState; onClose: (confirmed?: boolean) => void }) {
+  return (
+    <div className="dialog-backdrop" onMouseDown={() => onClose(false)}>
+      <section className="app-dialog" onMouseDown={(event) => event.stopPropagation()}>
+        <h2>{dialog.title}</h2>
+        <p>{dialog.message}</p>
+        <footer>
+          {!dialog.notice && <button className="btn secondary" onClick={() => onClose(false)}>{dialog.cancelLabel ?? "取消"}</button>}
+          <button className={`btn ${dialog.danger ? "danger" : "primary"}`} onClick={() => onClose(true)}>{dialog.confirmLabel ?? "确定"}</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="field"><span>{label}</span>{children}</label>;
 }
 
 function Select({ value, onChange, options, label }: { value: string; onChange: (value: string) => void; options: readonly string[]; label?: string }) {
-  return <label className={label ? "select-wrap filter-select" : "select-wrap"}>{label && <span>{label}</span>}<select value={value} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
+  return <label className={label ? "select-wrap filter-select" : "select-wrap"}>{label && <span>{label}</span>}<select value={value} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option value={option} key={option}>{option || "请选择"}</option>)}</select></label>;
 }
 
 function Metric({ label, value, note, icon, tone }: { label: string; value: number; note: string; icon: ReactNode; tone: string }) {
