@@ -300,6 +300,7 @@ td.due { color: var(--warning); font-weight: 600; }
 .preference-settings-body .profile-skills { min-height: 105px; }
 .preference-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .preference-footer span { color: var(--muted); font-size: 11px; }
+.profile-save-btn { min-width: 108px; padding-inline: 14px; }
 .split-layout { display: grid; grid-template-columns: 390px 1fr; gap: 13px; min-height: calc(100vh - 126px); }
 .side-list { padding: 14px; }
 .section-heading { margin-bottom: 12px; padding: 2px 2px 12px; border-bottom: 1px solid var(--line); }
@@ -334,6 +335,18 @@ td.due { color: var(--warning); font-weight: 600; }
 .app-dialog h2 { font-size: 16px; }
 .app-dialog p { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.7; }
 .app-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.tour-layer { position: fixed; z-index: 40; inset: 0; pointer-events: none; }
+.tour-interaction-blocker { position: fixed; z-index: 1; inset: 0; background: transparent; pointer-events: auto; transition: background .22s ease; }
+.tour-interaction-blocker.dimmed { background: rgba(28, 31, 29, .58); }
+.tour-focus { position: fixed; z-index: 2; border-radius: 8px; box-shadow: 0 0 0 9999px rgba(28, 31, 29, .58); opacity: 1; pointer-events: none; transition: top .3s ease, left .3s ease, width .3s ease, height .3s ease, opacity .16s ease; }
+.tour-card { position: fixed; z-index: 3; width: min(372px, calc(100vw - 36px)); padding: 17px; border: 1px solid var(--line); border-radius: 8px; background: white; box-shadow: 0 14px 34px rgba(28, 31, 29, .22); opacity: 1; pointer-events: auto; transition: top .3s ease, left .3s ease, transform .3s ease, opacity .16s ease; }
+.tour-layer.positioning .tour-focus, .tour-layer.positioning .tour-card { opacity: 0; }
+.tour-card.centered { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.tour-card > span { color: var(--primary-dark); font-size: 11px; font-weight: 700; }
+.tour-card h2 { margin-top: 8px; font-size: 17px; }
+.tour-card p { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.tour-card footer, .tour-card footer div { display: flex; align-items: center; gap: 8px; }
+.tour-card footer { justify-content: space-between; margin-top: 17px; }
 
 @media (max-width: 1250px) {
   html, body, #root { min-width: 1024px; }

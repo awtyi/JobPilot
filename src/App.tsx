@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import {
   Archive,
   BarChart3,
@@ -65,9 +65,19 @@ type SaveState = "loading" | "saving" | "saved" | "error";
 type JobView = "table" | "board" | "cards";
 type QuickAddStep = "input" | "confirm";
 type DialogState = { title: string; message: string; confirmLabel?: string; cancelLabel?: string; danger?: boolean; notice?: boolean };
+type TourStep = { target?: string; page?: Page; title: string; text: string };
 
 const QUICK_ADD_DRAFT_KEY = "jobpilot-quick-add-draft";
 const JOB_DRAFT_PREFIX = "jobpilot-job-draft:";
+const ONBOARDING_VERSION = "2026.06.1";
+const ONBOARDING_STORAGE_KEY = "jobpilot-onboarding-version";
+const onboardingSteps: TourStep[] = [
+  { title: "欢迎使用 JobPilot", text: "把岗位、跟进和面试复盘集中到一个本地优先的工作台。岗位数据默认保存在当前浏览器，不会自动上传。" },
+  { target: "jd-recognize", title: "从 JD识别 开始", text: "粘贴 JD 原文，确认系统拆分出的公司、岗位、地点、职责和要求，再保存为岗位机会。" },
+  { target: "nav-jobs", page: "jobs", title: "集中管理岗位机会", text: "在这里切换表格、看板和卡片视图，筛选岗位，并拖动卡片更新求职阶段。" },
+  { target: "profile-settings", page: "settings", title: "维护个人求职画像", text: "填写目标方向、技能、地点和薪资期望，系统会据此计算画像建议分。" },
+  { target: "nav-interviews", page: "interviews", title: "及时记录面试复盘", text: "沉淀面试问题、反馈和改进动作，让每次沟通都成为下一次准备的输入。" },
+];
 
 const pageMeta: Record<Page, { label: string; icon: typeof Gauge; caption: string }> = {
   dashboard: { label: "工作台", icon: Gauge, caption: "今天的求职进展，一眼看清" },
@@ -238,6 +248,8 @@ export function App() {
   const [preferenceProfile, setPreferenceProfile] = useState<JobPreferenceProfile>(loadPreferenceProfile);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const dialogResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const [tourOpen, setTourOpen] = useState(() => localStorage.getItem(ONBOARDING_STORAGE_KEY) !== ONBOARDING_VERSION);
+  const [tourStep, setTourStep] = useState(0);
 
   useEffect(() => {
     loadJobs()
@@ -294,6 +306,26 @@ export function App() {
     dialogResolveRef.current = null;
     setDialog(null);
     resolve?.(confirmed);
+  };
+
+  const closeTour = () => {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, ONBOARDING_VERSION);
+    setTourOpen(false);
+    setTourStep(0);
+  };
+
+  const finishTour = () => {
+    closeTour();
+    setPage("dashboard");
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
+  };
+
+  const restartTour = () => {
+    setEditingJob(null);
+    setQuickAddOpen(false);
+    setDialog(null);
+    setTourStep(0);
+    setTourOpen(true);
   };
 
   const saveJob = async (job: Job) => {
@@ -481,7 +513,7 @@ export function App() {
     if (page === "interviews") return <InterviewsPage jobs={jobs} onSave={saveJob} onConfirm={requestConfirm} />;
     if (page === "analytics") return <AnalyticsPage jobs={jobs} directions={directionOptions} />;
     if (page === "exports") return <ExportsPage jobs={jobs} setJobs={replaceJobsState} setLastBackup={setLastBackup} onConfirm={requestConfirm} onNotify={notify} />;
-    return <SettingsPage jobs={jobs} directions={directionOptions} displayName={displayName} setDisplayName={setDisplayName} preferenceProfile={preferenceProfile} onSavePreferenceProfile={async (profile) => {
+    return <SettingsPage jobs={jobs} directions={directionOptions} displayName={displayName} setDisplayName={setDisplayName} preferenceProfile={preferenceProfile} onRestartTour={restartTour} onSavePreferenceProfile={async (profile) => {
       const normalized = persistPreferenceProfile(profile);
       setPreferenceProfile(normalized);
       const updatedJobs = jobsRef.current.map((job) => ({ ...job, ...buildMatchSuggestion(job, normalized), updatedAt: new Date().toISOString() }));
@@ -523,7 +555,7 @@ export function App() {
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索公司、岗位或关键词" />
             </label>
             <button className="btn secondary" onClick={() => setEditingJob(createBlankJob(defaultJobDirection(directionOptions)))}><Plus size={16} /> 新增岗位</button>
-            <button className="btn primary" onClick={() => setQuickAddOpen(true)}><Sparkles size={16} /> JD识别</button>
+            <button data-tour-id="jd-recognize" className="btn primary" onClick={() => setQuickAddOpen(true)}><Sparkles size={16} /> JD识别</button>
           </div>
         </header>
         <div className="page-content">{renderPage()}</div>
@@ -539,6 +571,7 @@ export function App() {
         return saved;
       }} onDelete={deleteJob} />}
       {dialog && <AppDialog dialog={dialog} onClose={closeDialog} />}
+      {tourOpen && <OnboardingTour step={tourStep} steps={onboardingSteps} onStep={setTourStep} onPage={setPage} onClose={closeTour} onFinish={finishTour} />}
     </div>
   );
 }
@@ -561,7 +594,7 @@ function Sidebar({ page, setPage, jobs, saveState, lastBackup, quickFilter }: {
       <nav className="nav-list">
         {(Object.keys(pageMeta) as Page[]).map((item) => {
           const Icon = pageMeta[item].icon;
-          return <button className={`nav-item ${page === item ? "active" : ""}`} onClick={() => setPage(item)} key={item}><Icon size={17} />{pageMeta[item].label}</button>;
+          return <button data-tour-id={`nav-${item}`} className={`nav-item ${page === item ? "active" : ""}`} onClick={() => setPage(item)} key={item}><Icon size={17} />{pageMeta[item].label}</button>;
         })}
       </nav>
       <div className="sidebar-section">
@@ -835,12 +868,13 @@ function ExportsPage({ jobs, setJobs, setLastBackup, onConfirm, onNotify }: {
   );
 }
 
-function SettingsPage({ jobs, directions, displayName, setDisplayName, preferenceProfile, onSavePreferenceProfile, onAddDirection, onRenameDirection, onDeleteDirection }: {
+function SettingsPage({ jobs, directions, displayName, setDisplayName, preferenceProfile, onRestartTour, onSavePreferenceProfile, onAddDirection, onRenameDirection, onDeleteDirection }: {
   jobs: Job[];
   directions: Direction[];
   displayName: string;
   setDisplayName: (value: string) => void;
   preferenceProfile: JobPreferenceProfile;
+  onRestartTour: () => void;
   onSavePreferenceProfile: (profile: JobPreferenceProfile) => void;
   onAddDirection: (value: string) => Direction | null;
   onRenameDirection: (direction: Direction, value: string) => void;
@@ -858,6 +892,7 @@ function SettingsPage({ jobs, directions, displayName, setDisplayName, preferenc
       <section><header><Pencil size={19} /><div><h3>工作台称呼</h3><p>用于首页欢迎语，默认显示“管理员”。</p></div></header><div className="setting-control"><input value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={20} placeholder="管理员" /><button className="btn secondary" onClick={saveDisplayName}>保存</button></div></section>
       <DirectionSettings directions={directions} onAdd={onAddDirection} onRename={onRenameDirection} onDelete={onDeleteDirection} />
       <PreferenceProfileSettings profile={preferenceProfile} onSave={onSavePreferenceProfile} />
+      <section><header><CircleHelp size={19} /><div><h3>操作指引</h3><p>重新查看首次使用时的核心操作路径。</p></div></header><button className="btn secondary" onClick={onRestartTour}>重新查看</button></section>
       <section><header><ShieldCheck size={19} /><div><h3>本地优先存储</h3><p>岗位、联系人、薪资和跟进记录默认保存在当前浏览器 IndexedDB 中。</p></div></header><Tag tone="green">已启用</Tag></section>
       <section><header><Sparkles size={19} /><div><h3>AI 云端分析</h3><p>首版仅使用本地规则拆分 JD，不会把任何内容发送到外部模型。</p></div></header><Tag tone="gray">未启用</Tag></section>
       <section><header><Archive size={19} /><div><h3>当前数据量</h3><p>建议每周导出一次 JSON 备份，并自行保管导出的文件。</p></div></header><strong>{jobs.length} 条岗位</strong></section>
@@ -897,7 +932,7 @@ function PreferenceProfileSettings({ profile, onSave }: { profile: JobPreference
   });
   return (
     <section className="preference-settings">
-      <header><Sparkles size={19} /><div><h3>个人求职画像</h3><p>用于计算个人匹配度。不同用户应维护自己的方向、技能、地点和薪资期望。</p></div></header>
+      <header data-tour-id="profile-settings"><Sparkles size={19} /><div><h3>个人求职画像</h3><p>用于计算个人匹配度。不同用户应维护自己的方向、技能、地点和薪资期望。</p></div></header>
       <div className="preference-settings-body">
         <div className="form-grid two">
           <Field label="目标方向"><textarea value={directions} onChange={(event) => setDirections(event.target.value)} placeholder="AI产品经理、解决方案产品" /></Field>
@@ -907,7 +942,7 @@ function PreferenceProfileSettings({ profile, onSave }: { profile: JobPreference
         </div>
         <Field label="个人技能（每行：技能 | 别名，可多个 | 权重 1-5）"><textarea className="profile-skills" value={skills} onChange={(event) => setSkills(event.target.value)} placeholder={"RAG | 检索增强、知识库问答 | 5\n需求分析 | 需求梳理 | 4"} /></Field>
         <Field label="自定义 JD 关键词"><textarea value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder="行业术语、证书或希望额外关注的能力" /></Field>
-        <div className="preference-footer"><span>内置技能词库 v{SKILL_LIBRARY_VERSION} · {builtInSkills.length} 个常用词</span><button className="btn primary" onClick={save}><Check size={14} /> 保存画像并重算</button></div>
+        <div className="preference-footer"><span>内置技能词库 v{SKILL_LIBRARY_VERSION} · {builtInSkills.length} 个常用词</span><button className="btn primary compact profile-save-btn" onClick={save}>保存并重算</button></div>
       </div>
     </section>
   );
@@ -1307,6 +1342,97 @@ function AppDialog({ dialog, onClose }: { dialog: DialogState; onClose: (confirm
         <footer>
           {!dialog.notice && <button className="btn secondary" onClick={() => onClose(false)}>{dialog.cancelLabel ?? "取消"}</button>}
           <button className={`btn ${dialog.danger ? "danger" : "primary"}`} onClick={() => onClose(true)}>{dialog.confirmLabel ?? "确定"}</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function OnboardingTour({ step, steps, onStep, onPage, onClose, onFinish }: {
+  step: number;
+  steps: TourStep[];
+  onStep: (step: number) => void;
+  onPage: (page: Page) => void;
+  onClose: () => void;
+  onFinish: () => void;
+}) {
+  const current = steps[step];
+  const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
+  const [isPositioning, setIsPositioning] = useState(false);
+  useEffect(() => {
+    if (current.page) onPage(current.page);
+  }, [current.page, onPage]);
+  useLayoutEffect(() => {
+    let retryTimer: number | undefined;
+    let animationFrame: number | undefined;
+    let attempts = 0;
+    setIsPositioning(Boolean(current.target && window.innerWidth >= 720));
+    const trackTarget = (target: HTMLElement, frames = 20) => {
+      setTargetRect(target.getBoundingClientRect());
+      setIsPositioning(false);
+      if (frames > 0) animationFrame = window.requestAnimationFrame(() => trackTarget(target, frames - 1));
+    };
+    const measure = () => {
+      if (!current.target || window.innerWidth < 720) {
+        setTargetRect(null);
+        setIsPositioning(false);
+        return;
+      }
+      const target = document.querySelector<HTMLElement>(`[data-tour-id="${current.target}"]`);
+      if (!target) {
+        attempts += 1;
+        if (attempts < 8) {
+          retryTimer = window.setTimeout(measure, 60);
+          return;
+        }
+        setTargetRect(null);
+        setIsPositioning(false);
+        return;
+      }
+      const bounds = target.getBoundingClientRect();
+      if (bounds.top < 18 || bounds.bottom > window.innerHeight - 18) {
+        target.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+      }
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(() => trackTarget(target));
+    };
+    const timer = window.setTimeout(measure, 50);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.clearTimeout(timer);
+      if (retryTimer) window.clearTimeout(retryTimer);
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener("resize", measure);
+    };
+  }, [current.page, current.target]);
+  const padding = 8;
+  const rect = window.innerWidth >= 720 && targetRect && targetRect.width > 0 && targetRect.height > 0 ? {
+    top: Math.max(0, targetRect.top - padding),
+    left: Math.max(0, targetRect.left - padding),
+    right: Math.min(window.innerWidth, targetRect.right + padding),
+    bottom: Math.min(window.innerHeight, targetRect.bottom + padding),
+  } : null;
+  const cardStyle = rect ? {
+    top: Math.min(window.innerHeight - 230, Math.max(18, rect.bottom + 14)),
+    left: Math.min(window.innerWidth - 390, Math.max(18, rect.left)),
+  } : undefined;
+  const next = () => step === steps.length - 1 ? onFinish() : onStep(step + 1);
+  return (
+    <div className={`tour-layer ${isPositioning ? "positioning" : ""}`}>
+      <div className={`tour-interaction-blocker ${rect && !isPositioning ? "" : "dimmed"}`} />
+      {rect && (
+        <div className="tour-focus" style={{ top: rect.top, left: rect.left, width: rect.right - rect.left, height: rect.bottom - rect.top }} />
+      )}
+      <section className={`tour-card ${rect ? "" : "centered"}`} style={cardStyle}>
+        <span>操作指引 {step + 1}/{steps.length}</span>
+        <h2>{current.title}</h2>
+        <p>{current.text}</p>
+        <footer>
+          <button className="text-btn" onClick={onClose}>跳过</button>
+          <div>
+            {step > 0 && <button className="btn secondary" onClick={() => onStep(step - 1)}>上一步</button>}
+            <button className="btn primary" onClick={next}>{step === steps.length - 1 ? "开始使用" : "下一步"}</button>
+          </div>
         </footer>
       </section>
     </div>
