@@ -182,9 +182,16 @@ function formatDate(date: string) {
   return date.slice(5, 10).replace("-", "/");
 }
 
+function localDateValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function isDue(date: string) {
   if (!date) return false;
-  return date <= new Date().toISOString().slice(0, 10);
+  return date <= localDateValue();
 }
 
 function downloadFile(content: string, filename: string, type = "text/plain;charset=utf-8") {
@@ -241,7 +248,7 @@ export function App() {
   const [priorityFilter, setPriorityFilter] = useState<Priority | "全部">("全部");
   const [directionFilter, setDirectionFilter] = useState<Direction | "全部">("全部");
   const [locationFilter, setLocationFilter] = useState("");
-  const [dueOnly, setDueOnly] = useState(false);
+  const [followUpBefore, setFollowUpBefore] = useState("");
   const [directionOptions, setDirectionOptions] = useState<Direction[]>(loadDirections);
   const [lastBackup, setLastBackup] = useState(localStorage.getItem("jobpilot-last-backup") ?? "尚未备份");
   const [displayName, setDisplayName] = useState(localStorage.getItem("jobpilot-display-name") ?? "管理员");
@@ -405,8 +412,8 @@ export function App() {
       && (priorityFilter === "全部" || job.priority === priorityFilter)
       && (directionFilter === "全部" || job.jobDirection === directionFilter)
       && (!locationFilter || job.location.includes(locationFilter))
-      && (!dueOnly || isDue(job.nextFollowUpAt));
-  }), [directionFilter, dueOnly, jobs, locationFilter, priorityFilter, search, stageFilter]);
+      && (!followUpBefore || (Boolean(job.nextFollowUpAt) && job.nextFollowUpAt <= followUpBefore));
+  }), [directionFilter, followUpBefore, jobs, locationFilter, priorityFilter, search, stageFilter]);
 
   const clearFilters = () => {
     setSearch("");
@@ -414,7 +421,7 @@ export function App() {
     setPriorityFilter("全部");
     setDirectionFilter("全部");
     setLocationFilter("");
-    setDueOnly(false);
+    setFollowUpBefore("");
   };
 
   const quickFilter = (kind: "due" | "a" | "analysis" | "wuhan") => {
@@ -423,7 +430,7 @@ export function App() {
     if (kind === "a") setPriorityFilter("A");
     if (kind === "analysis") setStageFilter("待分析");
     if (kind === "wuhan") setLocationFilter("武汉");
-    if (kind === "due") setDueOnly(true);
+    if (kind === "due") setFollowUpBefore(localDateValue());
   };
 
   const addDirection = (value: string) => {
@@ -485,7 +492,7 @@ export function App() {
   };
 
   const renderPage = () => {
-    if (page === "dashboard") return <Dashboard jobs={jobs} displayName={displayName} onOpen={setEditingJob} onPage={setPage} />;
+    if (page === "dashboard") return <Dashboard jobs={jobs} displayName={displayName} onOpen={setEditingJob} onPage={setPage} onQuickFilter={quickFilter} />;
     if (page === "jobs") return (
       <JobsPage
         jobs={filteredJobs}
@@ -503,6 +510,8 @@ export function App() {
         setDirectionFilter={setDirectionFilter}
         locationFilter={locationFilter}
         setLocationFilter={setLocationFilter}
+        followUpBefore={followUpBefore}
+        setFollowUpBefore={setFollowUpBefore}
         clearFilters={clearFilters}
         onQuickAdd={() => setQuickAddOpen(true)}
         onManualAdd={() => setEditingJob(createBlankJob(defaultJobDirection(directionOptions)))}
@@ -550,10 +559,6 @@ export function App() {
             <h1>{pageMeta[page].label}</h1>
           </div>
           <div className="topbar-actions">
-            <label className="top-search">
-              <Search size={16} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索公司、岗位或关键词" />
-            </label>
             <button className="btn secondary" onClick={() => setEditingJob(createBlankJob(defaultJobDirection(directionOptions)))}><Plus size={16} /> 新增岗位</button>
             <button data-tour-id="jd-recognize" className="btn primary" onClick={() => setQuickAddOpen(true)}><Sparkles size={16} /> JD识别</button>
           </div>
@@ -615,7 +620,7 @@ function Sidebar({ page, setPage, jobs, saveState, lastBackup, quickFilter }: {
   );
 }
 
-function Dashboard({ jobs, displayName, onOpen, onPage }: { jobs: Job[]; displayName: string; onOpen: (job: Job) => void; onPage: (page: Page) => void }) {
+function Dashboard({ jobs, displayName, onOpen, onPage, onQuickFilter }: { jobs: Job[]; displayName: string; onOpen: (job: Job) => void; onPage: (page: Page) => void; onQuickFilter: (kind: "due" | "a" | "analysis" | "wuhan") => void }) {
   const dueJobs = jobs.filter((job) => isDue(job.nextFollowUpAt)).slice(0, 5);
   const focusJobs = jobs.filter((job) => job.priority === "A").slice(0, 4);
   const interviewCount = jobs.filter((job) => job.stage === "面试中").length;
@@ -637,13 +642,13 @@ function Dashboard({ jobs, displayName, onOpen, onPage }: { jobs: Job[]; display
         <Metric label="A 级机会" value={focusJobs.length} note="优先投入准备时间" icon={<Sparkles size={17} />} tone="green" />
       </section>
       <section className="dashboard-grid">
-        <Panel title="今日待办" action={<button className="text-btn" onClick={() => onPage("jobs")}>查看全部 <ChevronRight size={14} /></button>}>
+        <Panel title="今日待办" action={<button className="text-btn" onClick={() => onQuickFilter("due")}>查看全部 <ChevronRight size={14} /></button>}>
           {dueJobs.length ? <div className="follow-list">{dueJobs.map((job) => <button className="follow-row" onClick={() => onOpen(job)} key={job.id}><span className="date-box">{formatDate(job.nextFollowUpAt)}</span><span><strong>{job.companyName} · {job.jobTitle}</strong><small>{job.nextAction || "补充下一步行动"}</small></span><ChevronRight size={15} /></button>)}</div> : <EmptyLine text="今天没有到期事项，可以整理新岗位。" />}
         </Panel>
         <Panel title="求职漏斗" action={<button className="text-btn" onClick={() => onPage("analytics")}>进入分析 <ChevronRight size={14} /></button>}>
           <div className="mini-funnel">{funnel.map((item, index) => <div className="funnel-row" key={item.stage}><span>{item.stage}</span><div><i style={{ width: `${Math.max(12, 94 - index * 11)}%` }} /></div><strong>{item.count}</strong></div>)}</div>
         </Panel>
-        <Panel title="A 级重点机会" action={<button className="text-btn" onClick={() => onPage("jobs")}>管理机会 <ChevronRight size={14} /></button>}>
+        <Panel title="A 级重点机会" action={<button className="text-btn" onClick={() => onQuickFilter("a")}>管理机会 <ChevronRight size={14} /></button>}>
           <div className="focus-list">{focusJobs.map((job) => <button onClick={() => onOpen(job)} key={job.id}><span><strong>{job.companyName}</strong><small>{job.jobTitle}</small></span><Tag tone={stageTone[job.stage]}>{job.stage}</Tag><em>{job.matchScore}</em></button>)}</div>
         </Panel>
         <Panel title="高频能力要求" action={<button className="text-btn" onClick={() => onPage("analytics")}>查看排行 <ChevronRight size={14} /></button>}>
@@ -659,10 +664,10 @@ function JobsPage(props: {
   search: string; setSearch: (value: string) => void; stageFilter: Stage | "全部"; setStageFilter: (value: Stage | "全部") => void;
   priorityFilter: Priority | "全部"; setPriorityFilter: (value: Priority | "全部") => void;
   directionFilter: Direction | "全部"; setDirectionFilter: (value: Direction | "全部") => void;
-  locationFilter: string; setLocationFilter: (value: string) => void; clearFilters: () => void;
+  locationFilter: string; setLocationFilter: (value: string) => void; followUpBefore: string; setFollowUpBefore: (value: string) => void; clearFilters: () => void;
   onQuickAdd: () => void; onManualAdd: () => void; onOpen: (job: Job) => void; onMoveStage: (id: string, stage: Stage) => void;
 }) {
-  const { jobs, allCount, directions, view, setView, search, setSearch, stageFilter, setStageFilter, priorityFilter, setPriorityFilter, directionFilter, setDirectionFilter, locationFilter, setLocationFilter, clearFilters, onOpen, onMoveStage } = props;
+  const { jobs, allCount, directions, view, setView, search, setSearch, stageFilter, setStageFilter, priorityFilter, setPriorityFilter, directionFilter, setDirectionFilter, locationFilter, setLocationFilter, followUpBefore, setFollowUpBefore, clearFilters, onOpen, onMoveStage } = props;
   return (
     <div className="stack">
       <section className="jobs-toolbar">
@@ -679,6 +684,7 @@ function JobsPage(props: {
         <Select value={stageFilter} onChange={(value) => setStageFilter(value as Stage | "全部")} options={["全部", ...stages]} label="阶段" />
         <Select value={priorityFilter} onChange={(value) => setPriorityFilter(value as Priority | "全部")} options={["全部", ...priorities]} label="优先级" />
         <label className="compact-input"><BriefcaseBusiness size={15} /><input value={locationFilter} onChange={(event) => setLocationFilter(event.target.value)} placeholder="地点" /></label>
+        <label className="compact-input follow-up-date-filter" title="筛选所选日期及之前需要跟进的岗位"><CalendarClock size={15} /><input type="date" aria-label="跟进截止日" value={followUpBefore} onChange={(event) => setFollowUpBefore(event.target.value)} /></label>
         <button className="icon-btn" onClick={clearFilters} title="清空筛选"><X size={16} /></button>
       </section>
       {view === "table" && <JobTable jobs={jobs} onOpen={onOpen} />}

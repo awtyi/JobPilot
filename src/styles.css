@@ -61,9 +61,8 @@ h1, h2, h3, p { margin: 0; }
 .topbar h1 { margin-top: 2px; font-size: 20px; letter-spacing: 0; }
 .eyebrow { color: var(--muted); font-size: 11px; }
 .topbar-actions, .jobs-toolbar, .filter-bar, .segmented, .drawer-footer, .drawer-footer > div { display: flex; align-items: center; gap: 8px; }
-.top-search, .filter-search, .compact-input { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: white; }
-.top-search { width: 240px; padding: 0 10px; }
-.top-search input, .filter-search input, .compact-input input { width: 100%; height: 34px; border: 0; outline: 0; background: transparent; font-size: 12px; }
+.filter-search, .compact-input { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: white; }
+.filter-search input, .compact-input input { width: 100%; height: 34px; border: 0; outline: 0; background: transparent; font-size: 12px; }
 .page-content { max-width: 1540px; margin: 0 auto; padding: 23px 26px 36px; }
 .stack { display: grid; gap: 17px; }
 .btn { display: inline-flex; height: 35px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border: 1px solid transparent; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
@@ -127,6 +126,7 @@ h1, h2, h3, p { margin: 0; }
 .filter-bar { min-height: 54px; padding: 9px; }
 .filter-search { width: 245px; padding: 0 8px; }
 .compact-input { width: 110px; padding: 0 8px; }
+.follow-up-date-filter { width: 152px; }
 .select-wrap { display: block; }
 .select-wrap select { width: 100%; height: 35px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; outline: 0; color: #555951; background: white; font-size: 12px; }
 .filter-select { display: flex; align-items: center; gap: 4px; padding: 0 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: white; font-size: 12px; }
@@ -352,7 +352,6 @@ td.due { color: var(--warning); font-weight: 600; }
   html, body, #root { min-width: 1024px; }
   .app { grid-template-columns: 190px 1fr; }
   .sidebar { width: 190px; }
-  .top-search { width: 190px; }
   .page-content { padding-inline: 20px; }
   .sidebar-status span { width: 130px; }
 }

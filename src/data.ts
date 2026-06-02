@@ -104,7 +104,10 @@ const today = new Date();
 const date = (offset: number) => {
   const target = new Date(today);
   target.setDate(today.getDate() + offset);
-  return target.toISOString().slice(0, 10);
+  const year = target.getFullYear();
+  const month = String(target.getMonth() + 1).padStart(2, "0");
+  const day = String(target.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 };
 
 const seedJobs = [
