@@ -194,6 +194,14 @@ function isDue(date: string) {
   return date <= localDateValue();
 }
 
+function getTimeGreeting(date = new Date()) {
+  const hour = date.getHours();
+  if (hour < 11) return "早上好";
+  if (hour < 14) return "中午好";
+  if (hour < 18) return "下午好";
+  return "晚上好";
+}
+
 function downloadFile(content: string, filename: string, type = "text/plain;charset=utf-8") {
   const link = document.createElement("a");
   link.href = URL.createObjectURL(new Blob([content], { type }));
@@ -239,6 +247,7 @@ export function App() {
   const jobsRef = useRef<Job[]>([]);
   const persistQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
   const [page, setPage] = useState<Page>("dashboard");
+  const [dashboardRefreshKey, setDashboardRefreshKey] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<Job | null>(null);
@@ -278,6 +287,10 @@ export function App() {
     setDirectionOptions(merged);
     persistDirections(merged);
   }, [directionOptions, jobs]);
+
+  useEffect(() => {
+    if (page === "dashboard") setDashboardRefreshKey((key) => key + 1);
+  }, [page]);
 
   const replaceJobsState = (items: Job[]) => {
     jobsRef.current = items;
@@ -492,7 +505,7 @@ export function App() {
   };
 
   const renderPage = () => {
-    if (page === "dashboard") return <Dashboard jobs={jobs} displayName={displayName} onOpen={setEditingJob} onPage={setPage} onQuickFilter={quickFilter} />;
+    if (page === "dashboard") return <Dashboard jobs={jobs} displayName={displayName} refreshKey={dashboardRefreshKey} onOpen={setEditingJob} onPage={setPage} onQuickFilter={quickFilter} />;
     if (page === "jobs") return (
       <JobsPage
         jobs={filteredJobs}
@@ -620,7 +633,21 @@ function Sidebar({ page, setPage, jobs, saveState, lastBackup, quickFilter }: {
   );
 }
 
-function Dashboard({ jobs, displayName, onOpen, onPage, onQuickFilter }: { jobs: Job[]; displayName: string; onOpen: (job: Job) => void; onPage: (page: Page) => void; onQuickFilter: (kind: "due" | "a" | "analysis" | "wuhan") => void }) {
+function Dashboard({ jobs, displayName, refreshKey, onOpen, onPage, onQuickFilter }: { jobs: Job[]; displayName: string; refreshKey: number; onOpen: (job: Job) => void; onPage: (page: Page) => void; onQuickFilter: (kind: "due" | "a" | "analysis" | "wuhan") => void }) {
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+  useEffect(() => {
+    const refreshTime = () => setCurrentTime(new Date());
+    window.addEventListener("focus", refreshTime);
+    document.addEventListener("visibilitychange", refreshTime);
+    return () => {
+      window.removeEventListener("focus", refreshTime);
+      document.removeEventListener("visibilitychange", refreshTime);
+    };
+  }, []);
+  useEffect(() => {
+    setCurrentTime(new Date());
+  }, [refreshKey]);
+  const greeting = getTimeGreeting(currentTime);
   const dueJobs = jobs.filter((job) => isDue(job.nextFollowUpAt)).slice(0, 5);
   const focusJobs = jobs.filter((job) => job.priority === "A").slice(0, 4);
   const interviewCount = jobs.filter((job) => job.stage === "面试中").length;
@@ -631,7 +658,7 @@ function Dashboard({ jobs, displayName, onOpen, onPage, onQuickFilter }: { jobs:
     <div className="stack">
       <section className="welcome-row">
         <div>
-          <h2>早上好，{displayName}</h2>
+          <h2>{greeting}，{displayName}</h2>
           <p>先处理临近跟进，再把新看到的岗位随手收进来。</p>
         </div>
       </section>
